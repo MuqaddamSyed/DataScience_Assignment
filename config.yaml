@@ -1,0 +1,67 @@
+project:
+  name: "Sales Forecasting System"
+  version: "1.0.0"
+  random_seed: 42
+
+data:
+  raw_path: "training_data/Forecasting Case- Study.xlsx"
+  date_column: "Date"
+  target_column: "sales"
+  state_column: "State"
+  resample_freq: "W"           # weekly resampling (Sunday end-of-week)
+  forecast_horizon: 8          # weeks ahead
+
+train:
+  test_size: 0.20              # last 20% as validation
+  min_train_size: 50           # minimum training samples required
+
+features:
+  lags: [1, 2, 4, 8, 13, 26]  # weeks: 1w, 2w, 1m, 2m, 3m, 6m
+  rolling_windows: [4, 8, 13] # weeks: ~1m, 2m, 3m
+  holiday_country: "US"
+
+models:
+  arima:
+    max_p: 3
+    max_q: 3
+    max_d: 2
+    seasonal: false
+  sarima:
+    order: [1, 1, 1]
+    seasonal_order: [1, 1, 1, 52]  # yearly seasonality (52 weeks)
+  xgboost:
+    n_estimators: 300
+    max_depth: 5
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    random_state: 42
+  lstm:
+    sequence_length: 26         # 26 weeks lookback
+    hidden_size: 64
+    num_layers: 2
+    dropout: 0.2
+    epochs: 100
+    batch_size: 16
+    learning_rate: 0.001
+    patience: 15               # early stopping
+  prophet:
+    yearly_seasonality: true
+    weekly_seasonality: true
+    daily_seasonality: false
+    changepoint_prior_scale: 0.05
+    seasonality_prior_scale: 10.0
+
+paths:
+  models_dir: "models"
+  logs_dir: "logs"
+
+api:
+  host: "0.0.0.0"
+  port: 8000
+  title: "Sales Forecasting API"
+  description: "Production-grade 8-week ahead sales forecasting per US state"
+  version: "1.0.0"
+  # CORS: tighten for production. ["*"] only for dev/demo.
+  cors_origins: ["*"]
+  cors_allow_credentials: false
