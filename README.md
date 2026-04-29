@@ -7,7 +7,7 @@ Production-style end-to-end time-series forecasting pipeline that predicts the n
 | **Models** | ARIMA, SARIMA, XGBoost, LSTM, Prophet — plus an inverse-RMSE-weighted **ensemble** of the top-2 |
 | **Pipeline** | Excel → preprocess → feature engineering → 5-model bake-off → ensemble → registry → API |
 | **API** | FastAPI with Swagger UI at `/docs`; **95% confidence intervals** on every forecast |
-| **Dashboard** | `streamlit run dashboard/app.py` — interactive forecast explorer |
+| **Dashboard** | `make dashboard` (or `streamlit run dashboard/app.py` from repo root; use `make dashboard` if `~/.streamlit` is not writable) |
 | **Validation** | Time-series split + **walk-forward CV** (5 expanding folds) + per-step horizon error analysis |
 | **Tuning** | **Optuna** (TPE sampler) for XGBoost hyper-parameters across representative states |
 | **Tests** | `pytest tests/` — **44 tests** including a no-leakage assertion and CI-bound validation |
@@ -54,7 +54,7 @@ make train
 make serve         # → open http://localhost:8000/docs
 
 # 4. (optional) launch the interactive dashboard
-make dashboard     # → http://localhost:8501
+make dashboard     # → http://localhost:8501 (uses project-local HOME so ~/.streamlit need not be writable)
 ```
 
 Other useful targets:
@@ -327,6 +327,7 @@ models:
 
 ## Further Reading
 
+- **`documentation.md`** — technical reference: repo map, pipeline, API, security, troubleshooting.
 - **`notebooks/01_eda.ipynb`** — full EDA: stationarity (ADF), ACF/PACF, seasonal decomposition.
 - **`DECISIONS.md`** — why I made each architectural choice.
 - **`LIMITATIONS.md`** — what I'd do next, ranked.

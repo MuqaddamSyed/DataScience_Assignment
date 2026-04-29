@@ -41,7 +41,10 @@ tune:                       ## Hyperparameter tuning for XGBoost
 horizon:                    ## Per-step error analysis
 	$(PY) run_horizon_analysis.py
 
-dashboard:                  ## Launch Streamlit dashboard
+dashboard:                  ## Launch Streamlit (uses .streamlit_home so ~/.streamlit need not be writable)
+	@mkdir -p $(CURDIR)/.streamlit_home/.streamlit
+	HOME=$(CURDIR)/.streamlit_home \
+	STREAMLIT_BROWSER_GATHER_USAGE_STATS=false \
 	$(VENV)/bin/streamlit run dashboard/app.py
 
 eda:                        ## Re-execute the EDA notebook

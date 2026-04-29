@@ -1,0 +1,7 @@
+# Project-local Streamlit defaults (merged when you run from repo root).
+
+[browser]
+gatherUsageStats = false
+
+[server]
+headless = false

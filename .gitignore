@@ -43,3 +43,6 @@ htmlcov/
 
 # Prophet / CmdStan
 .cmdstan/
+
+# Streamlit local HOME (see Makefile `dashboard`)
+.streamlit_home/

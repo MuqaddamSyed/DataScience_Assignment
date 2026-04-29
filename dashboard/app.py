@@ -129,7 +129,8 @@ display_df["forecast_high"] = display_df["forecast_high"].round(2)
 display_df.insert(0, "week", range(1, len(display_df) + 1))
 st.dataframe(
     display_df[["week", "date", "forecast", "forecast_low", "forecast_high"]],
-    use_container_width=True, hide_index=True,
+    width="stretch",
+    hide_index=True,
 )
 
 # ── Validation metrics ─────────────────────────────────────────────────────
@@ -137,7 +138,7 @@ st.subheader("All models — validation metrics for this state")
 mdf = pd.DataFrame(registry[state]["metrics"]).T.round(2)
 mdf = mdf.sort_values("rmse")
 mdf["selected"] = mdf.index == best
-st.dataframe(mdf, use_container_width=True)
+st.dataframe(mdf, width="stretch")
 
 # ── Global view ────────────────────────────────────────────────────────────
 with st.expander("Best-model distribution across all states"):
