@@ -59,11 +59,14 @@ def main(states: Optional[List[str]] = None) -> None:
         logger.info("[%d/%d] State: %s", i, len(state_series), state)
         try:
             result = train_all_models(state, series)
-            registry[state] = {
+            entry = {
                 "best_model": result["best_model"],
                 "metrics": result["metrics"],
                 "series_length": result["series_length"],
             }
+            if "ensemble" in result:
+                entry["ensemble"] = result["ensemble"]
+            registry[state] = entry
         except Exception as exc:
             logger.error("Training failed for '%s': %s", state, exc)
             registry[state] = {

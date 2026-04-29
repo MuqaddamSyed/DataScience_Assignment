@@ -32,6 +32,15 @@ python-dotenv==1.2.1
 pyyaml==6.0.3
 joblib==1.5.3
 matplotlib==3.9.4
+seaborn==0.13.2
+
+# ── Hyper-parameter tuning ─────────────────────────────────────────────
+optuna==4.8.0
+
+# ── Interactive dashboard + EDA notebook ───────────────────────────────
+streamlit==1.50.0
+jupyter==1.1.1
+nbformat==5.10.4
 
 # ── Tests ──────────────────────────────────────────────────────────────
 pytest==8.4.2

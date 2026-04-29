@@ -11,7 +11,9 @@ from pydantic import BaseModel, Field
 class ForecastPoint(BaseModel):
     week: int = Field(..., description="Week number in forecast (1–8)")
     date: str = Field(..., description="Forecast date (ISO 8601)")
-    forecast_sales: float = Field(..., description="Predicted sales value")
+    forecast_sales: float = Field(..., description="Predicted sales (point estimate)")
+    forecast_low: float = Field(..., description="Lower bound of 95% confidence interval")
+    forecast_high: float = Field(..., description="Upper bound of 95% confidence interval")
 
 
 class ForecastResponse(BaseModel):

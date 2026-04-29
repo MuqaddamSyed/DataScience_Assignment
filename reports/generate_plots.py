@@ -94,6 +94,7 @@ def plot_mape_by_state(registry: Dict) -> None:
         "xgboost": "#2ca02c",
         "lstm": "#d62728",
         "prophet": "#9467bd",
+        "ensemble": "#17becf",
     }
     bar_colors = [colors.get(m, "#888") for m in df["model"]]
     ax.barh(df["state"], df["mape"], color=bar_colors)
@@ -128,7 +129,10 @@ def plot_forecast_for_state(
 
     # Generate the 8-week future forecast from the trained best model
     try:
-        future_df = forecast_state(state, series, best_model, horizon=8)
+        ensemble_meta = registry_entry.get("ensemble") if best_model == "ensemble" else None
+        future_df = forecast_state(
+            state, series, best_model, horizon=8, ensemble_meta=ensemble_meta,
+        )
     except Exception as exc:
         logger.error("Forecast failed for %s: %s", state, exc)
         return
@@ -140,7 +144,13 @@ def plot_forecast_for_state(
         future_df["date"], future_df["forecast"],
         color="#d62728", ls="--", marker="o", lw=2, label=f"Forecast ({best_model})",
     )
-    # Vertical line at train/val boundary
+    if "forecast_low" in future_df.columns and "forecast_high" in future_df.columns:
+        ax.fill_between(
+            future_df["date"],
+            future_df["forecast_low"],
+            future_df["forecast_high"],
+            color="#d62728", alpha=0.18, label="95% CI",
+        )
     ax.axvline(val.index[0], color="grey", ls=":", alpha=0.6)
     ax.set_title(f"{state} — 8-Week Sales Forecast (best model: {best_model})", fontsize=13)
     ax.set_ylabel("Weekly sales")

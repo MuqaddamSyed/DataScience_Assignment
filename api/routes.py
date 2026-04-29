@@ -157,6 +157,7 @@ def predict(
         raise HTTPException(status_code=500, detail=f"Series missing for state '{state_key}'")
 
     best_model = registry[state_key]["best_model"]
+    ensemble_meta = registry[state_key].get("ensemble") if best_model == "ensemble" else None
 
     try:
         forecast_df = forecast_state(
@@ -164,6 +165,7 @@ def predict(
             series=series,
             best_model_name=best_model,
             horizon=HORIZON,
+            ensemble_meta=ensemble_meta,
         )
     except FileNotFoundError as exc:
         raise HTTPException(
@@ -180,12 +182,12 @@ def predict(
     forecast_points = [
         ForecastPoint(
             week=i + 1,
-            date=str(pd_ts.date()),
-            forecast_sales=round(float(forecast), 2),
+            date=str(row["date"].date()),
+            forecast_sales=round(float(row["forecast"]), 2),
+            forecast_low=round(float(row["forecast_low"]), 2),
+            forecast_high=round(float(row["forecast_high"]), 2),
         )
-        for i, (pd_ts, forecast) in enumerate(
-            zip(forecast_df["date"].tolist(), forecast_df["forecast"].tolist())
-        )
+        for i, (_, row) in enumerate(forecast_df.iterrows())
     ]
 
     return ForecastResponse(

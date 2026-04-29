@@ -1,25 +1,30 @@
 project:
-  name: "Sales Forecasting System"
-  version: "1.0.0"
+  name: Sales Forecasting System
+  version: 1.0.0
   random_seed: 42
-
 data:
-  raw_path: "training_data/Forecasting Case- Study.xlsx"
-  date_column: "Date"
-  target_column: "sales"
-  state_column: "State"
-  resample_freq: "W"           # weekly resampling (Sunday end-of-week)
-  forecast_horizon: 8          # weeks ahead
-
+  raw_path: training_data/Forecasting Case- Study.xlsx
+  date_column: Date
+  target_column: sales
+  state_column: State
+  resample_freq: W
+  forecast_horizon: 8
 train:
-  test_size: 0.20              # last 20% as validation
-  min_train_size: 50           # minimum training samples required
-
+  test_size: 0.2
+  min_train_size: 50
 features:
-  lags: [1, 2, 4, 8, 13, 26]  # weeks: 1w, 2w, 1m, 2m, 3m, 6m
-  rolling_windows: [4, 8, 13] # weeks: ~1m, 2m, 3m
-  holiday_country: "US"
-
+  lags:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 13
+  - 26
+  rolling_windows:
+  - 4
+  - 8
+  - 13
+  holiday_country: US
 models:
   arima:
     max_p: 3
@@ -27,41 +32,49 @@ models:
     max_d: 2
     seasonal: false
   sarima:
-    order: [1, 1, 1]
-    seasonal_order: [1, 1, 1, 52]  # yearly seasonality (52 weeks)
+    order:
+    - 1
+    - 1
+    - 1
+    seasonal_order:
+    - 1
+    - 1
+    - 1
+    - 52
   xgboost:
     n_estimators: 300
-    max_depth: 5
-    learning_rate: 0.05
-    subsample: 0.8
-    colsample_bytree: 0.8
+    max_depth: 4
+    learning_rate: 0.18043311207136262
+    subsample: 0.9100531293444458
+    colsample_bytree: 0.8277250010609204
     random_state: 42
+    min_child_weight: 5
+    reg_alpha: 0.6842330265121569
+    reg_lambda: 1.5002874126238674
   lstm:
-    sequence_length: 26         # 26 weeks lookback
+    sequence_length: 26
     hidden_size: 64
     num_layers: 2
     dropout: 0.2
     epochs: 100
     batch_size: 16
     learning_rate: 0.001
-    patience: 15               # early stopping
+    patience: 15
   prophet:
     yearly_seasonality: true
     weekly_seasonality: true
     daily_seasonality: false
     changepoint_prior_scale: 0.05
     seasonality_prior_scale: 10.0
-
 paths:
-  models_dir: "models"
-  logs_dir: "logs"
-
+  models_dir: models
+  logs_dir: logs
 api:
-  host: "0.0.0.0"
+  host: 0.0.0.0
   port: 8000
-  title: "Sales Forecasting API"
-  description: "Production-grade 8-week ahead sales forecasting per US state"
-  version: "1.0.0"
-  # CORS: tighten for production. ["*"] only for dev/demo.
-  cors_origins: ["*"]
+  title: Sales Forecasting API
+  description: Production-grade 8-week ahead sales forecasting per US state
+  version: 1.0.0
+  cors_origins:
+  - '*'
   cors_allow_credentials: false

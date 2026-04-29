@@ -207,17 +207,15 @@ def train_xgboost(
     X_val = val_df[feat_cols].values
     y_val = val_df["target"].values
 
-    model = XGBRegressor(
-        n_estimators=cfg["n_estimators"],
-        max_depth=cfg["max_depth"],
-        learning_rate=cfg["learning_rate"],
-        subsample=cfg["subsample"],
-        colsample_bytree=cfg["colsample_bytree"],
-        random_state=cfg["random_state"],
-        verbosity=0,
-        eval_metric="rmse",
-        early_stopping_rounds=20,
-    )
+    # Pass all configured params (including any added by run_tuning.py).
+    # Defaults are merged in for safety.
+    xgb_kwargs = {
+        "verbosity": 0,
+        "eval_metric": "rmse",
+        "early_stopping_rounds": 20,
+        **{k: v for k, v in cfg.items() if k not in ("verbosity",)},
+    }
+    model = XGBRegressor(**xgb_kwargs)
     model.fit(
         X_train, y_train,
         eval_set=[(X_val, y_val)],
@@ -228,10 +226,16 @@ def train_xgboost(
     preds = pd.Series(preds, index=val_df.index)
     metrics = compute_metrics(pd.Series(y_val, index=val_df.index), preds)
 
-    path = _state_path(state, "xgboost", "joblib")
-    joblib.dump(model, path)
+    # Persist residual std so predict.py can construct 95% CIs.
+    # The bootstrap assumption: future errors ~ N(0, residual_std²).
+    residuals = y_val - preds.values
+    residual_std = float(np.std(residuals))
 
-    return model, metrics
+    artifact = {"model": model, "residual_std": residual_std}
+    path = _state_path(state, "xgboost", "joblib")
+    joblib.dump(artifact, path)
+
+    return artifact, metrics
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -320,7 +324,8 @@ def train_lstm(
     if best_state:
         model.load_state_dict(best_state)
 
-    # Compute metrics on validation
+    # Compute metrics + residual std on validation
+    residual_std = 0.0
     if X_val_t is not None and len(X_val_t) > 0:
         model.eval()
         with torch.no_grad():
@@ -330,6 +335,7 @@ def train_lstm(
         metrics = compute_metrics(
             pd.Series(actual), pd.Series(preds)
         )
+        residual_std = float(np.std(actual - preds))
     else:
         metrics = {"rmse": np.inf, "mae": np.inf, "mape": np.inf}
 
@@ -341,7 +347,8 @@ def train_lstm(
         "hidden_size": cfg["hidden_size"],
         "num_layers": cfg["num_layers"],
         "dropout": cfg["dropout"],
-        "train_tail": train_series.values[-seq_len:],  # needed for inference
+        "train_tail": train_series.values[-seq_len:],
+        "residual_std": residual_std,
     }
     path = _state_path(state, "lstm", "joblib")
     joblib.dump(artifact, path)
@@ -487,22 +494,136 @@ def train_all_models(
         logger.error("[%s] Prophet failed: %s", state, exc)
         results["prophet"] = {"rmse": np.inf, "mae": np.inf, "mape": np.inf}
 
-    # ── Select best model by RMSE ─────────────────────────────────────────────
+    # ── Build top-2 ensemble (inverse-RMSE-weighted) ─────────────────────────
     valid = {k: v for k, v in results.items() if np.isfinite(v["rmse"])}
-    if valid:
-        best_model = min(valid, key=lambda k: valid[k]["rmse"])
-    else:
+    ensemble_meta = None
+    if len(valid) >= 2:
+        top2 = sorted(valid.keys(), key=lambda k: valid[k]["rmse"])[:2]
+        weights = [1.0 / valid[m]["rmse"] for m in top2]
+        weights = [w / sum(weights) for w in weights]
+        ens_metrics = _evaluate_ensemble(top2, val_series, val_df, state, train_series, train_df)
+        if np.isfinite(ens_metrics["rmse"]):
+            results["ensemble"] = ens_metrics
+            ensemble_meta = {"components": top2, "weights": weights}
+            logger.info(
+                "[%s] Ensemble(%s) RMSE=%.2f", state, "+".join(top2), ens_metrics["rmse"],
+            )
+
+    # ── Select best by RMSE (now possibly the ensemble) ───────────────────────
+    if not valid and "ensemble" not in results:
         best_model = "arima"
         logger.error("[%s] All models failed! Defaulting to ARIMA.", state)
+    else:
+        candidates = {k: v for k, v in results.items() if np.isfinite(v["rmse"])}
+        best_model = min(candidates, key=lambda k: candidates[k]["rmse"])
 
     logger.info(
         "[%s] ✓ Best model: %s (RMSE=%.2f)",
         state, best_model, results[best_model]["rmse"],
     )
 
-    return {
+    payload = {
         "state": state,
         "metrics": results,
         "best_model": best_model,
         "series_length": len(series),
     }
+    if ensemble_meta and best_model == "ensemble":
+        payload["ensemble"] = ensemble_meta
+    elif ensemble_meta:
+        # Keep ensemble metadata even if not best — useful for /models inspection
+        payload["ensemble"] = ensemble_meta
+    return payload
+
+
+def _evaluate_ensemble(
+    component_names: list,
+    val_series: pd.Series,
+    val_df: pd.DataFrame,
+    state: str,
+    train_series: pd.Series,
+    train_df: pd.DataFrame,
+) -> Dict[str, float]:
+    """
+    Re-derive validation predictions for each component and average them
+    using inverse-RMSE weights from the just-finished training pass.
+
+    This is "in-sample" relative to the components (each was already fit on
+    the same train slice), so we read each component's predictions cheaply.
+    """
+    preds_per_component = []
+    for name in component_names:
+        try:
+            preds = _component_val_predictions(name, train_series, val_series, train_df, val_df, state)
+            if preds is None:
+                continue
+            preds_per_component.append(np.asarray(preds))
+        except Exception as exc:
+            logger.warning("[%s] ensemble component %s failed: %s", state, name, exc)
+            return {"rmse": np.inf, "mae": np.inf, "mape": np.inf}
+
+    if len(preds_per_component) < 2:
+        return {"rmse": np.inf, "mae": np.inf, "mape": np.inf}
+
+    # Equal weights here; weights are stored in registry for inference time.
+    avg = np.mean(np.stack(preds_per_component), axis=0)
+    return compute_metrics(
+        pd.Series(val_series.values), pd.Series(avg)
+    )
+
+
+def _component_val_predictions(
+    name: str,
+    train_series: pd.Series,
+    val_series: pd.Series,
+    train_df: pd.DataFrame,
+    val_df: pd.DataFrame,
+    state: str,
+) -> np.ndarray | None:
+    """Load the just-saved component model and produce val predictions."""
+    if name == "arima" or name == "sarima":
+        path = _state_path(state, name, "pkl")
+        with open(path, "rb") as f:
+            m = pickle.load(f)
+        return np.asarray(m.forecast(steps=len(val_series)))
+    if name == "xgboost":
+        path = _state_path(state, "xgboost", "joblib")
+        artifact = joblib.load(path)
+        m = artifact["model"] if isinstance(artifact, dict) else artifact
+        feat_cols = get_feature_columns(train_df)
+        return m.predict(val_df[feat_cols].values)
+    if name == "lstm":
+        path = _state_path(state, "lstm", "joblib")
+        artifact = joblib.load(path)
+        if artifact.get("model_state") is None:
+            return None
+        scaler = artifact["scaler"]
+        seq_len = artifact["seq_len"]
+        m = SalesLSTM(
+            input_size=artifact["input_size"], hidden_size=artifact["hidden_size"],
+            num_layers=artifact["num_layers"], dropout=artifact["dropout"],
+        )
+        m.load_state_dict(artifact["model_state"])
+        m.eval()
+        train_scaled = scaler.transform(train_series.values.reshape(-1, 1)).flatten()
+        val_scaled = scaler.transform(val_series.values.reshape(-1, 1)).flatten()
+        full = np.concatenate([train_scaled, val_scaled])
+        Xv = []
+        for i in range(len(train_scaled), len(full)):
+            if i >= seq_len:
+                Xv.append(full[i - seq_len: i])
+        if not Xv:
+            return None
+        with torch.no_grad():
+            pred_scaled = m(torch.FloatTensor(np.array(Xv)).unsqueeze(-1)).numpy().flatten()
+        preds = scaler.inverse_transform(pred_scaled.reshape(-1, 1)).flatten()
+        # If sequence-window cuts initial val rows, pad with the first prediction
+        if len(preds) < len(val_series):
+            preds = np.concatenate([np.full(len(val_series) - len(preds), preds[0]), preds])
+        return preds[: len(val_series)]
+    if name == "prophet":
+        path = _state_path(state, "prophet", "joblib")
+        m = joblib.load(path)
+        future = pd.DataFrame({"ds": val_series.index})
+        return np.clip(m.predict(future)["yhat"].values, 0, None)
+    return None

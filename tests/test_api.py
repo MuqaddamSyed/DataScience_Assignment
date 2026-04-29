@@ -54,7 +54,7 @@ class TestModels:
         body = r.json()
         assert body["total_states"] > 0
         for m in body["models"]:
-            assert m["best_model"] in {"arima", "sarima", "xgboost", "lstm", "prophet"}
+            assert m["best_model"] in {"arima", "sarima", "xgboost", "lstm", "prophet", "ensemble"}
             assert "rmse" in m["validation_metrics"][m["best_model"]]
 
     def test_filter_by_state_case_insensitive(self, client, known_state):
@@ -92,6 +92,15 @@ class TestPredict:
         r = client.get(f"/predict?state={known_state}")
         for p in r.json()["forecast"]:
             assert p["forecast_sales"] >= 0
+
+    def test_forecast_includes_confidence_intervals(self, client, known_state):
+        """Each forecast point must have low <= point <= high."""
+        r = client.get(f"/predict?state={known_state}")
+        for p in r.json()["forecast"]:
+            assert "forecast_low" in p
+            assert "forecast_high" in p
+            assert p["forecast_low"] >= 0
+            assert p["forecast_low"] <= p["forecast_sales"] <= p["forecast_high"]
 
     def test_unknown_state_returns_404(self, client):
         r = client.get("/predict?state=Atlantis")

@@ -22,7 +22,7 @@ from __future__ import annotations
 import pickle
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 
 import joblib
 import numpy as np
@@ -101,35 +101,60 @@ def load_best_model(state: str, model_name: str) -> Any:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Per-model forecasters
+# Per-model forecasters — each returns (point, low, high) lists of length `horizon`
+#
+# ARIMA / SARIMA / Prophet use native confidence intervals from their
+# distributional assumptions. XGBoost / LSTM use bootstrap CIs from
+# validation residuals (point ± 1.96·σ for 95%).
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _forecast_arima(model: Any, series: pd.Series, horizon: int) -> List[float]:
-    preds = model.forecast(steps=horizon)
-    return [max(0.0, float(v)) for v in preds]
+ForecastTriplet = Tuple[List[float], List[float], List[float]]
+_Z_95 = 1.96  # standard normal critical value for 95% CI
 
 
-def _forecast_sarima(model: Any, series: pd.Series, horizon: int) -> List[float]:
-    preds = model.forecast(steps=horizon)
-    return [max(0.0, float(v)) for v in preds]
+def _expand_horizon_steps(steps: int) -> List[float]:
+    """Multiplier so uncertainty grows with horizon (sqrt(t) random walk)."""
+    return [float(np.sqrt(i)) for i in range(1, steps + 1)]
 
 
-def _forecast_xgboost(model: Any, series: pd.Series, horizon: int) -> List[float]:
-    """Recursive multi-step forecasting with XGBoost."""
+def _forecast_arima(model: Any, series: pd.Series, horizon: int) -> ForecastTriplet:
+    res = model.get_forecast(steps=horizon)
+    point = res.predicted_mean.values
+    ci = res.conf_int(alpha=0.05).values  # [low, high]
+    low, high = ci[:, 0], ci[:, 1]
+    return (
+        [max(0.0, float(v)) for v in point],
+        [max(0.0, float(v)) for v in low],
+        [max(0.0, float(v)) for v in high],
+    )
+
+
+def _forecast_sarima(model: Any, series: pd.Series, horizon: int) -> ForecastTriplet:
+    return _forecast_arima(model, series, horizon)
+
+
+def _forecast_xgboost(artifact: Any, series: pd.Series, horizon: int) -> ForecastTriplet:
+    """Recursive multi-step forecasting with XGBoost. Returns (point, low, high)."""
+    # Backward compatibility: artifact can be the bare model (old) or a dict (new)
+    if isinstance(artifact, dict):
+        model = artifact["model"]
+        residual_std = artifact.get("residual_std", 0.0)
+    else:
+        model = artifact
+        residual_std = 0.0
+
     extended = series.copy()
     future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=FREQ)[1:]
-    predictions: List[float] = []
+    point: List[float] = []
 
     for fdate in future_dates:
-        # Add placeholder NaN for the target date
         placeholder = pd.Series([np.nan], index=pd.DatetimeIndex([fdate]))
         temp = pd.concat([extended, placeholder])
-
         feat_df = build_features(temp)
+
         if fdate not in feat_df.index:
-            # Fallback: use last known value (cast to native float to avoid numpy scalar surprises)
             fallback = float(max(0.0, float(extended.iloc[-1])))
-            predictions.append(fallback)
+            point.append(fallback)
             extended = pd.concat([extended, pd.Series([fallback], index=pd.DatetimeIndex([fdate]))])
             continue
 
@@ -137,24 +162,25 @@ def _forecast_xgboost(model: Any, series: pd.Series, horizon: int) -> List[float
         feat_cols = get_feature_columns(row)
         pred = float(model.predict(row[feat_cols].values)[0])
         pred = max(0.0, pred)
-        predictions.append(pred)
+        point.append(pred)
+        extended = pd.concat([extended, pd.Series([pred], index=pd.DatetimeIndex([fdate]))])
 
-        extended = pd.concat([
-            extended,
-            pd.Series([pred], index=pd.DatetimeIndex([fdate])),
-        ])
-
-    return predictions
+    expand = _expand_horizon_steps(horizon)
+    low = [max(0.0, p - _Z_95 * residual_std * e) for p, e in zip(point, expand)]
+    high = [p + _Z_95 * residual_std * e for p, e in zip(point, expand)]
+    return point, low, high
 
 
-def _forecast_lstm(artifact: Dict[str, Any], series: pd.Series, horizon: int) -> List[float]:
-    """Recursive LSTM forecasting: unroll horizon steps."""
+def _forecast_lstm(artifact: Dict[str, Any], series: pd.Series, horizon: int) -> ForecastTriplet:
+    """Recursive LSTM forecasting with bootstrap CIs."""
     scaler = artifact["scaler"]
     seq_len = artifact["seq_len"]
+    residual_std = artifact.get("residual_std", 0.0)
     device = torch.device("cpu")
 
     if artifact.get("model_state") is None:
-        return [float(series.mean())] * horizon
+        flat = [float(series.mean())] * horizon
+        return flat, flat, flat
 
     model = SalesLSTM(
         input_size=artifact["input_size"],
@@ -165,73 +191,118 @@ def _forecast_lstm(artifact: Dict[str, Any], series: pd.Series, horizon: int) ->
     model.load_state_dict(artifact["model_state"])
     model.eval()
 
-    # Seed sequence with last `seq_len` known values
     seed = series.values[-seq_len:].reshape(-1, 1)
     seed_scaled = scaler.transform(seed).flatten()
     sequence = list(seed_scaled)
 
-    predictions: List[float] = []
+    point: List[float] = []
     with torch.no_grad():
         for _ in range(horizon):
             x = torch.FloatTensor(sequence[-seq_len:]).unsqueeze(0).unsqueeze(-1).to(device)
             pred_scaled = model(x).item()
             sequence.append(pred_scaled)
             pred = float(scaler.inverse_transform([[pred_scaled]])[0][0])
-            predictions.append(max(0.0, pred))
+            point.append(max(0.0, pred))
 
-    return predictions
+    expand = _expand_horizon_steps(horizon)
+    low = [max(0.0, p - _Z_95 * residual_std * e) for p, e in zip(point, expand)]
+    high = [p + _Z_95 * residual_std * e for p, e in zip(point, expand)]
+    return point, low, high
 
 
-def _forecast_prophet(model: Any, series: pd.Series, horizon: int) -> List[float]:
+def _forecast_prophet(model: Any, series: pd.Series, horizon: int) -> ForecastTriplet:
     future_dates = pd.date_range(start=series.index[-1], periods=horizon + 1, freq=FREQ)[1:]
     future_df = pd.DataFrame({"ds": future_dates})
     forecast = model.predict(future_df)
-    return [max(0.0, float(v)) for v in forecast["yhat"].values]
+    point = [max(0.0, float(v)) for v in forecast["yhat"].values]
+    low = [max(0.0, float(v)) for v in forecast["yhat_lower"].values]
+    high = [max(0.0, float(v)) for v in forecast["yhat_upper"].values]
+    return point, low, high
 
 
 # ══════════════════════════════════════════════════════════════════════════════
 # Public API
 # ══════════════════════════════════════════════════════════════════════════════
 
+_DISPATCHERS = {
+    "arima": _forecast_arima,
+    "sarima": _forecast_sarima,
+    "xgboost": _forecast_xgboost,
+    "lstm": _forecast_lstm,
+    "prophet": _forecast_prophet,
+}
+
+
+def _forecast_single(
+    state: str, series: pd.Series, model_name: str, horizon: int,
+) -> ForecastTriplet:
+    """Load one base model and produce (point, low, high)."""
+    if model_name not in _DISPATCHERS:
+        raise ValueError(f"Unknown model: {model_name}")
+    model = load_best_model(state, model_name)
+    return _DISPATCHERS[model_name](model, series, horizon)
+
+
+def _forecast_ensemble(
+    state: str,
+    series: pd.Series,
+    components: List[str],
+    weights: List[float],
+    horizon: int,
+) -> ForecastTriplet:
+    """Weighted average of component forecasts."""
+    weights = np.asarray(weights, dtype=float)
+    weights = weights / weights.sum()  # safety normalisation
+    pts, lows, highs = [], [], []
+    for c in components:
+        p, l, h = _forecast_single(state, series, c, horizon)
+        pts.append(p); lows.append(l); highs.append(h)
+    pts = np.average(np.array(pts), axis=0, weights=weights)
+    lows = np.average(np.array(lows), axis=0, weights=weights)
+    highs = np.average(np.array(highs), axis=0, weights=weights)
+    return pts.tolist(), lows.tolist(), highs.tolist()
+
+
 def forecast_state(
     state: str,
     series: pd.Series,
     best_model_name: str,
     horizon: int = HORIZON,
+    ensemble_meta: dict | None = None,
 ) -> pd.DataFrame:
     """
-    Generate a forecast for a single state using its best model.
+    Generate a forecast for a single state using its selected best model.
 
-    Returns a DataFrame with columns: ['date', 'forecast', 'model'].
+    If `best_model_name == "ensemble"`, `ensemble_meta` must be supplied
+    with keys 'components' (list of model names) and 'weights' (list of floats).
+
+    Returns DataFrame with columns:
+        ['date', 'forecast', 'forecast_low', 'forecast_high', 'model', 'state']
     """
     logger.info("Forecasting '%s' with %s (horizon=%d)", state, best_model_name, horizon)
-    model = load_best_model(state, best_model_name)
 
-    dispatchers = {
-        "arima": _forecast_arima,
-        "sarima": _forecast_sarima,
-        "xgboost": _forecast_xgboost,
-        "lstm": _forecast_lstm,
-        "prophet": _forecast_prophet,
-    }
-
-    fn = dispatchers.get(best_model_name)
-    if fn is None:
-        raise ValueError(f"Unknown model: {best_model_name}")
-
-    preds = fn(model, series, horizon)
+    if best_model_name == "ensemble":
+        if not ensemble_meta:
+            raise ValueError("ensemble_meta is required when best_model_name=='ensemble'")
+        point, low, high = _forecast_ensemble(
+            state, series,
+            ensemble_meta["components"], ensemble_meta["weights"],
+            horizon,
+        )
+    else:
+        point, low, high = _forecast_single(state, series, best_model_name, horizon)
 
     future_dates = pd.date_range(
         start=series.index[-1], periods=horizon + 1, freq=FREQ
     )[1:]
-
-    result = pd.DataFrame({
+    return pd.DataFrame({
         "date": future_dates,
-        "forecast": preds,
+        "forecast": point,
+        "forecast_low": low,
+        "forecast_high": high,
         "model": best_model_name,
         "state": state,
     })
-    return result
 
 
 def forecast_all_states(

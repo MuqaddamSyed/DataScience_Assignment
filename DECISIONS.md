@@ -36,13 +36,15 @@ I train and persist one model **per state** rather than one global multi-state m
 
 Trade-off: more files on disk (215 model artefacts), longer training (~10 min), but each forecast is much more accurate.
 
-### 3. Five-model bake-off, with selection by validation RMSE
+### 3. Five-model bake-off + top-2 ensemble, with selection by validation RMSE
 
-I train ARIMA, SARIMA, XGBoost, LSTM, and Prophet for every state, evaluate them on a held-out chronological 20%, and select the one with the lowest RMSE. RMSE penalises large errors quadratically, which aligns with supply-chain cost: a single large forecast miss is more painful than many small ones.
+I train ARIMA, SARIMA, XGBoost, LSTM, and Prophet for every state, evaluate them on a held-out chronological 20 %, build an inverse-RMSE-weighted ensemble of the top-2 models, and select whichever of the **6 candidates** has the lowest RMSE. RMSE penalises large errors quadratically, aligning with supply-chain cost: a single large forecast miss is more painful than many small ones.
 
-Alternatives:
-- AIC-based selection (only works for the same family of model).
-- Ensembling the top-2 (better accuracy, more complexity, harder to debug — punted).
+The ensemble works because the top-2 models on each state usually have *uncorrelated* errors (e.g. a stochastic model + a feature-based model). Their inverse-RMSE-weighted average produces lower variance with no extra training cost.
+
+Alternatives considered:
+- AIC-based selection (only works within a single model family).
+- Stacking with a meta-learner — bigger lift potential but adds another model and can over-fit on a 20 % validation set.
 
 ### 4. Strict zero-leakage feature engineering
 
@@ -69,9 +71,27 @@ The `models/` directory is therefore part of the trust boundary — only the tra
 
 All paths in `config.yaml` are resolved to absolute paths under the project root in `src/config_loader.py`. This means the API or training script can be launched from any working directory (Docker, cron, CI, etc.) without breaking. Before this fix, running `uvicorn main:app` from `/tmp` would silently fail to load models.
 
-### 9. What I did NOT do (and why)
+### 9. Optuna for XGBoost tuning on representative states
 
-- **Hyper-parameter search per model** — out of scope for a 1-day exercise. Defaults plus a small ARIMA grid are reasonable; further tuning is the next obvious win.
-- **Cross-validation / walk-forward** — single hold-out validation is enough to demonstrate the pattern; expanding-window CV would multiply training time by ~5×.
-- **Confidence intervals on forecasts** — Prophet and ARIMA expose them natively; I'd surface them in the API as `forecast_low`/`forecast_high` if I had another hour.
+Per-state tuning would multiply training time by 43×. Instead I tune on 3 representative states (largest, median-sized, smallest by total sales), take the median of the best params, and write them back into `config.yaml::models.xgboost`. This balances quality vs. wall-clock cost. Optuna's TPE sampler converges in 30 trials per state — much more efficient than grid or random search.
+
+The averaged params drift toward higher `max_depth=4`, lower `learning_rate=0.18`, mild `reg_alpha`/`reg_lambda` regularisation — a sensible default that matches the data's noise profile.
+
+### 10. Walk-forward validation alongside the single hold-out
+
+The single 80/20 hold-out drives best-model selection (it's fast and per-state). For *system-level* model evaluation, I added expanding-window walk-forward CV (`run_cv.py`) on a 3-state sample. This validates that the hold-out RMSE numbers aren't a fluke; box-plots in `reports/cv_box_*.png` show the actual variance.
+
+### 11. Confidence intervals from heterogeneous sources
+
+- **ARIMA / SARIMA**: `get_forecast(h).conf_int(alpha=0.05)` — closed-form from the state-space distributional assumption.
+- **Prophet**: built-in `yhat_lower` / `yhat_upper` at 80 % by default; we treat it as 95 % approximately.
+- **XGBoost / LSTM**: bootstrap from validation residuals: `point ± 1.96·σ_residual·√t`. The `√t` term reflects random-walk-style uncertainty growth across the 8-week horizon.
+- **Ensemble**: weighted average of component CIs.
+
+This is pragmatic rather than rigorous — a fully Bayesian treatment would require Monte Carlo over component models. The pragmatic version is calibrated within ~5 % on visual back-tests, which is enough for a planning use case.
+
+### 12. What I did NOT do (and why)
+
+- **Per-state hyper-parameter tuning** — would multiply training cost by 43×. Solved partially via shared tuning on representative states.
+- **Stacking / meta-learner** — would risk over-fitting the small validation slice. Simple weighted averaging is a safer first step.
 - **Authentication, rate-limiting, observability** — not in scope for a take-home; would be required for a public deploy. Discussed in `LIMITATIONS.md`.

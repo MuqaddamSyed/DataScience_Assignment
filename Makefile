@@ -32,6 +32,21 @@ test:                       ## Run pytest suite
 report:                     ## Generate diagnostic plots into reports/
 	$(PY) reports/generate_plots.py
 
+cv:                         ## Walk-forward cross-validation on 3 sample states
+	$(PY) run_cv.py
+
+tune:                       ## Hyperparameter tuning for XGBoost
+	$(PY) run_tuning.py --trials 30
+
+horizon:                    ## Per-step error analysis
+	$(PY) run_horizon_analysis.py
+
+dashboard:                  ## Launch Streamlit dashboard
+	$(VENV)/bin/streamlit run dashboard/app.py
+
+eda:                        ## Re-execute the EDA notebook
+	$(VENV)/bin/jupyter nbconvert --to notebook --execute notebooks/01_eda.ipynb --output 01_eda.ipynb
+
 docker:                     ## Build the Docker image
 	docker build -t forecasting-api .
 
