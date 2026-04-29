@@ -222,5 +222,3 @@ Treat `models/` as **trusted** — only the training pipeline should write there
 | [LIMITATIONS.md](LIMITATIONS.md) | Known gaps and prioritised next steps |
 
 ---
-
-*Last updated to match the repository layout and behaviour described above. If behaviour and this file diverge, treat the code as authoritative.*
