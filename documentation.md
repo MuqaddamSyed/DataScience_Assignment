@@ -1,7 +1,4 @@
 # Technical documentation
-
-This document complements [README.md](README.md) with implementation detail, operational notes, and a compact API reference. For product-oriented quick start and results, use the README first.
-
 ---
 
 ## 1. Overview
